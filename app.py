@@ -385,9 +385,53 @@ def navigate_to(view, exercise=None):
 
 # --- ダッシュボード (メイン画面) ---
 def render_dashboard(df):
-    # CSSでスタイル調整
+    # CSSでスタイル調整 (Merged New & Existing AI Styles)
     st.markdown("""
     <style>
+        /* --- 1. 全体の背景と文字色 (New) --- */
+        .stApp {
+            background-color: #0E1117;
+            color: #FAFAFA;
+        }
+        
+        /* --- 2. カッコいいタイトルの定義 (New) --- */
+        .custom-title {
+            font-family: 'Helvetica Neue', sans-serif;
+            font-weight: 800;
+            font-size: 3rem;
+            background: -webkit-linear-gradient(45deg, #00FF00, #00FFFF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+            line-height: 1.2;
+        }
+
+        /* --- 3. ボタンをダサくなくする (New) --- */
+        .stButton button {
+            background-color: transparent;
+            border: 1px solid #4CAF50;
+            color: #4CAF50;
+            border-radius: 20px; /* 丸くする */
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .stButton button:hover {
+            background-color: #4CAF50;
+            color: white;
+            box-shadow: 0 0 10px #4CAF50;
+            border-color: #4CAF50;
+        }
+
+        /* --- 4. カードデザイン (New & Merged) --- */
+        .exercise-card {
+            background-color: #1E1E1E;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+
+        /* --- 5. AI Agent & Parts (Existing Preserved) --- */
         .dashboard-header {
             padding: 20px;
             background-color: #1E1E1E;
@@ -406,19 +450,6 @@ def render_dashboard(df):
             color: #E0E0E0;
             line-height: 1.5;
         }
-        .exercise-card {
-            background-color: #262730;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 10px;
-            cursor: pointer;
-            border: 1px solid #333;
-            transition: transform 0.1s;
-        }
-        .exercise-card:hover {
-            transform: scale(1.01);
-            border-color: #4CAF50;
-        }
         .part-badge {
             background-color: #444;
             color: #ddd;
@@ -434,6 +465,9 @@ def render_dashboard(df):
         }
     </style>
     """, unsafe_allow_html=True)
+
+    # ★修正1: タイトルを表示
+    st.markdown('<div class="custom-title">LIFT OS</div>', unsafe_allow_html=True)
 
     # 1. AIエージェントエリア
     with st.container():
@@ -486,11 +520,6 @@ def render_dashboard(df):
         target_exercises = EXERCISES[target_part]
 
     for exercise in target_exercises:
-        # カード風デザインのコンテナ
-        # Streamlitのボタンは全幅にできない制約やデザイン制約があるため、
-        # コンテナの中に情報を表示し、その直下に透明なボタンを置く...といったハックは難しい。
-        # シンプルに「種目名＋直近記録」と「詳細へ」ボタンを配置する
-        
         # 直近記録の取得
         last_rec_text = "記録なし"
         if not df.empty:
@@ -500,15 +529,15 @@ def render_dashboard(df):
                 last_rec_text = f"{last['重量(kg)']}kg x {last['回数(レップ)']} ({last['日付'].strftime('%m/%d')})"
 
         # 行で表示
-        with st.container():
-            c1, c2 = st.columns([4, 1])
+        with st.container(border=True): # カード風枠線
+            c1, c2 = st.columns([4, 1.2]) # ボタン幅を少し確保
             with c1:
                 st.markdown(f"**{exercise}**")
                 st.caption(f"{get_body_part(exercise)} • {last_rec_text}")
             with c2:
-                if st.button("記録 >", key=f"nav_{exercise}"):
+                # ★修正2: ボタン名を「記録」に変更
+                if st.button("記録", key=f"nav_{exercise}"):
                     navigate_to('detail', exercise)
-            st.divider()
 
 # --- 詳細画面 (入力 & グラフ) ---
 def render_detail_view(df, exercise_name):
@@ -518,7 +547,8 @@ def render_detail_view(df, exercise_name):
         if st.button("< Back"):
             navigate_to('dashboard')
     with c2:
-        st.title(exercise_name)
+        # ★修正3: 詳細画面のタイトルもカッコよく
+        st.markdown(f'<div class="custom-title" style="font-size: 2rem;">{exercise_name}</div>', unsafe_allow_html=True)
 
     # 既存データの抽出
     if not df.empty:
@@ -531,19 +561,26 @@ def render_detail_view(df, exercise_name):
 
     # Stats Header
     # 推定1RMの計算 (Epley formula: Weight * (1 + Reps/30))
+    # ★修正4: 「記録数」をやめて「最高記録(PR)」にする
     if not ex_df.empty:
         ex_df['1RM'] = ex_df['重量(kg)'] * (1 + ex_df['回数(レップ)'] / 30)
         last_item = ex_df.iloc[-1]
         last_date = last_item['日付'].strftime('%m/%d')
         count = len(ex_df)
+        
+        # 最高記録 (Personal Record) の計算
+        max_weight = ex_df['重量(kg)'].max()
+        pr_text = f"{int(max_weight)} kg"
     else:
         last_date = "-"
         count = 0
+        pr_text = "-- kg"
 
     h1, h2, h3 = st.columns(3)
     h1.metric("部位", get_body_part(exercise_name))
     h2.metric("前回", last_date)
-    h3.metric("記録数", f"{count}件")
+    # ここを変更
+    h3.metric("👑 最高記録", pr_text)
 
     st.markdown("---")
 
