@@ -205,20 +205,51 @@ def get_worksheet():
 def load_data():
     worksheet = get_worksheet()
     data = worksheet.get_all_values()
+    
     if not data:
-        return pd.DataFrame(columns=['日付', '部位', '種目名', '重量(kg)', '回数(レップ)'])
+        return pd.DataFrame(columns=['日付', '部位', '種目名', '重量(kg)', '回数(レップ)', 'ユーザー名'])
+    
     header = data[0]
+    
+    # スキーママイグレーション: ユーザー名カラムがない場合に追加
+    if 'ユーザー名' not in header:
+        try:
+            # 6列目(F列)にヘッダーを追加
+            worksheet.update_cell(1, 6, 'ユーザー名')
+            header.append('ユーザー名')
+        except Exception as e:
+            st.warning(f"スキーマ更新中にエラーが発生しましたが続行します: {e}")
+
     rows = data[1:]
     if not rows:
         return pd.DataFrame(columns=header)
-    df = pd.DataFrame(rows, columns=header)
+    
+    # 行の長さがヘッダーと異なる場合の補完処理
+    aligned_rows = []
+    for row in rows:
+        if len(row) < len(header):
+            row += [''] * (len(header) - len(row))
+        aligned_rows.append(row)
+
+    df = pd.DataFrame(aligned_rows, columns=header)
+    
+    # 現在のユーザーでフィルタリング
+    current_user = st.session_state.get('username')
+    if current_user:
+         df = df[df['ユーザー名'] == current_user]
+    
     return df
 
 def save_new_data(date, body_part, exercise, weight, reps):
     worksheet = get_worksheet()
-    row = [str(date), body_part, exercise, str(weight), str(reps)]
+    current_user = st.session_state.get('username', 'Unknown')
+    
+    row = [str(date), body_part, exercise, str(weight), str(reps), str(current_user)]
+    
+    # シートが空の場合のヘッダー作成
     if len(worksheet.get_all_values()) == 0:
-        worksheet.append_row(['日付', '部位', '種目名', '重量(kg)', '回数(レップ)'])
+        worksheet.append_row(['日付', '部位', '種目名', '重量(kg)', '回数(レップ)', 'ユーザー名'])
+    
     worksheet.append_row(row)
 
 def init_session_state():
@@ -228,11 +259,57 @@ def init_session_state():
         st.session_state['selected_exercise'] = None
     if 'selected_body_part' not in st.session_state:
         st.session_state['selected_body_part'] = 'All'
+    if 'username' not in st.session_state:
+        st.session_state['username'] = None
+    if 'is_logged_in' not in st.session_state:
+        st.session_state['is_logged_in'] = False
+
+def render_login():
+    st.markdown("""
+    <style>
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            flex-direction: column;
+        }
+        .login-title {
+            font-size: 3rem;
+            font-weight: 800;
+            background: -webkit-linear-gradient(45deg, #00FF00, #00FFFF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 30px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown('<div class="login-title" style="text-align: center;">LIFT OS</div>', unsafe_allow_html=True)
+    
+    with st.form("login_form"):
+        st.markdown("### ユーザーログイン")
+        username = st.text_input("ユーザー名")
+        submitted = st.form_submit_button("Start", type="primary", use_container_width=True)
+        
+        if submitted:
+            if username:
+                st.session_state['username'] = username
+                st.session_state['is_logged_in'] = True
+                st.rerun()
+            else:
+                st.error("ユーザー名を入力してください")
 
 def navigate_to(view, exercise=None):
     st.session_state['current_view'] = view
     if exercise:
         st.session_state['selected_exercise'] = exercise
+    st.rerun()
+
+def logout():
+    st.session_state['username'] = None
+    st.session_state['is_logged_in'] = False
+    st.session_state['current_view'] = 'dashboard'
     st.rerun()
 
 # --- ダッシュボード (メイン画面) ---
@@ -273,6 +350,13 @@ def render_dashboard(df):
             box-shadow: 0 0 10px #4CAF50;
             border-color: #4CAF50;
         }
+        
+        /* 認証済みヘッダー調整 */
+        .user-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
 
         /* 3. AIエリアの文字スタイル */
         .ai-title {
@@ -289,8 +373,14 @@ def render_dashboard(df):
     </style>
     """, unsafe_allow_html=True)
 
-    # タイトル
-    st.markdown('<div class="custom-title">LIFT OS</div>', unsafe_allow_html=True)
+    # タイトル & ユーザー情報
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.markdown(f'<div class="custom-title">LIFT OS</div>', unsafe_allow_html=True)
+    with c2:
+        st.write(f"User: **{st.session_state['username']}**")
+        if st.button("Logout", key="logout_btn", use_container_width=True):
+            logout()
 
     # 1. AIエージェントエリア (修正: 枠線コンテナにして謎の四角を消去)
     with st.container(border=True):
@@ -431,6 +521,11 @@ def render_detail_view(df, exercise_name):
 def main():
     st.set_page_config(page_title="LIFT OS", layout="centered") 
     init_session_state()
+
+    if not st.session_state['is_logged_in']:
+        render_login()
+        return
+
     try:
         df = load_data()
         if not df.empty:
