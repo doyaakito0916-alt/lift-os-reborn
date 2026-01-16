@@ -8,10 +8,14 @@ import openai
 from sklearn.linear_model import LinearRegression
 import numpy as np
 
+import json
+import os
+
 # --- 設定 ---
 SPREADSHEET_NAME = 'muscle_db'
+EXERCISES_FILE = 'exercises.json'
 
-EXERCISES = {
+DEFAULT_EXERCISES = {
     "胸": ["ベンチプレス", "インクラインベンチプレス", "インクラインダンベルプレス", "ディップス", "ペックフライ", "マシンプレス"],
     "背中": ["デッドリフト", "フロントプル", "ラットプル", "ローロー", "チンニング"],
     "脚": ["スクワット", "レッグエクステンション", "レッグカール", "レッグプレス", "ブルガリアンスクワット"],
@@ -19,11 +23,48 @@ EXERCISES = {
     "腕": ["スカルクラッシャー", "インクラインカール", "バーベルカール", "ケーブルプレスダウン"]
 }
 
+def load_exercises():
+    if os.path.exists(EXERCISES_FILE):
+        try:
+            with open(EXERCISES_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return DEFAULT_EXERCISES
+    return DEFAULT_EXERCISES
+
+def save_exercises(exercises):
+    with open(EXERCISES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(exercises, f, ensure_ascii=False, indent=4)
+
 def get_body_part(exercise_name):
-    for part, exercises in EXERCISES.items():
-        if exercise_name in exercises:
+    # セッションステートから取得、なければデフォルト
+    exercises = st.session_state.get('exercises', DEFAULT_EXERCISES)
+    for part, ex_list in exercises.items():
+        if exercise_name in ex_list:
             return part
     return "その他"
+
+def get_recovery_status(df):
+    status = {}
+    if df.empty:
+        return status
+    
+            # ユーザー固有のデータでフィルタリング済みであることを前提とする
+    # 各部位の最終トレーニング日を取得
+    exercises_dict = st.session_state.get('exercises', DEFAULT_EXERCISES)
+    for part in exercises_dict.keys():
+        # その部位に関連する種目を抽出
+        exercises = exercises_dict[part]
+        part_df = df[df['種目名'].isin(exercises)]
+        
+        if not part_df.empty:
+            last_date = pd.to_datetime(part_df['日付']).max()
+            days_since = (datetime.datetime.now() - last_date).days
+            status[part] = days_since
+        else:
+            status[part] = 999  # 未実施
+            
+    return status
 
 # --- JSタイマー機能 ---
 def render_js_timer():
@@ -129,51 +170,86 @@ def predict_next_weight(df, target_event):
     predicted_weight = model.predict([[today_days]])[0]
     return round(predicted_weight, 1)
 
-def get_ai_agent_advice(df):
+def get_ai_agent_advice(df, mode):
     if df.empty:
         return "データがありません。まずは初回のトレーニングを記録しましょう！"
+
+    # --- 1. 現状分析 (Context) ---
     df_sorted = df.sort_values('日付', ascending=False)
     last_record = df_sorted.iloc[0]
     last_date = pd.to_datetime(last_record['日付'])
-    today = datetime.datetime.now()
-    days_since_last = (today - last_date).days
-    target_event = last_record['種目名']
-    predicted_kg = predict_next_weight(df, target_event)
-    is_beginner = len(df) < 30
-    if is_beginner:
+    last_part = last_record['部位'] # 部位カラムを使う
+    days_since = (datetime.datetime.now() - last_date).days
+    
+    # 回復状況計算
+    recovery_status = get_recovery_status(df)
+    # 値が999(未実施)を除外してソートするか、そのまま使うか。
+    # ここでは未実施(999)は除外せずに、単純に日数が多い順(回復している順)に提案する
+    sorted_recovery = sorted(recovery_status.items(), key=lambda x: x[1], reverse=True)
+    recommended_part = sorted_recovery[0][0]
+
+    # --- 2. モード別プロンプト分岐 ---
+    # --- 2. モード別プロンプト分岐 ---
+    if mode == "🔥 鬼軍曹":
         system_prompt = """
-        あなたはユーザーを溺愛する「過保護なトレーニングマネージャー」です。
-        以下の制約を守ってください：
-        1. 難しい専門用語は一切使わないでください。
-        2. 「とにかくジムに来たこと」や「記録したこと」を大げさに褒めてください。
-        3. ユーザーが迷わないよう、今日のメニューを断定的に指示してください。
-        4. 口調は明るく、絵文字を多用してください。
+        あなたは地獄の鬼軍曹です。ユーザーは新兵です。
+        甘えは一切許しません。以下の口調で、次に鍛えるべき部位を命令してください。
+        
+        【口調のルール】
+        - 「貴様」「～だ！」「甘えるな！」などの強い言葉を使う。
+        - 褒めない。煽ってやる気を引き出す。
+        - 絵文字は🔥や💢のみ使用可。
+        - 回復している部位（サボっている部位）を徹底的に攻めるよう命令する。
+        - 100文字以内で短く怒鳴るように。
+        """
+        user_prompt = f"""
+        新兵の状況: 前回 {days_since}日前に {last_part} を実施。
+        最もサボっている部位: {recommended_part} ({recovery_status[recommended_part]}日経過)
+        
+        新兵を罵倒し、ジムへ叩き出してください。
+        """
+
+    elif mode == "✨ 励ましエンジェル":
+        system_prompt = """
+        あなたはユーザーを推している「アイドルのような天使」です。
+        とにかくハイテンションで、ユーザーの努力を全肯定してください。
+        
+        【口調のルール】
+        - 「すごい！」「えらい！」「優勝！」など、ポジティブな言葉を連発する。
+        - 絵文字（✨💖🥺🎉）を多用する。
+        - 回復している部位を「次はここを育てようね♡」と優しく提案する。
+        - 120文字以内で、読むだけで元気がでるメッセージを。
+        """
+        status_text = "\n".join([f"- {k}: {v}日お休み中" for k, v in recovery_status.items() if v != 999])
+        user_prompt = f"""
+        推しの状況: 前回 {days_since}日前に {last_part} を頑張った！
+        今の回復状況:\n{status_text}
+        おすすめ: {recommended_part}
+        
+        最高の笑顔で応援してください。
+        """
+
+    elif mode == "🤖 システムOS":
+        system_prompt = """
+        あなたは近未来のトレーニング支援OS「LIFT OS」のシステムボイスです。
+        感情を持たず、機械的かつクールに状況を報告してください。
+        
+        【口調のルール】
+        - 「スキャン完了」「推奨」「プロトコル開始」などのSF用語を使う。
+        - ユーザーを「パイロット」と呼ぶ。
+        - 感情的な言葉は排除し、事実と推奨事項のみを伝える。
+        - 100文字以内。
+        """
+        user_prompt = f"""
+        Pilot Status: Last Workout {days_since} days ago ({last_part}).
+        Target Recommendation: {recommended_part}.
+        
+        Generate mission briefing.
         """
     else:
-        system_prompt = """
-        あなたはデータ重視の「冷徹なAI分析官」です。
-        以下の制約を守ってください：
-        1. 「漸進的過負荷」や「ボリューム」などの観点から論理的に話してください。
-        2. 褒める必要はありません。データの事実と改善点だけを伝えてください。
-        3. 前回の記録を超えられるような、具体的な重量設定を提案してください。
-        4. 口調は敬語ですが、事務的でクールにしてください。
-        """
-    if predicted_kg:
-        ai_prediction_text = f"過去の成長トレンドに基づくと、今日の適正重量は【{predicted_kg}kg】です。"
-    else:
-        ai_prediction_text = "データ不足のため予測できません。まずはデータを溜めましょう。"
-    user_prompt = f"""
-    【ユーザーデータ】
-    - 前回のトレーニング日: {last_date.strftime('%Y-%m-%d')} ({days_since_last}日前)
-    - 前回の種目: {last_record['種目名']}
-    - 前回の重量: {last_record['重量(kg)']}kg
-    - 前回の回数: {last_record['回数(レップ)']}回
-    【AI予測モデルの推奨】
-    {ai_prediction_text}
-    この推奨値を参考に、ユーザーに今日の目標を伝えてください。
-    無理そうなら少し下げてもいいと伝えてください。
-    アドバイスは150文字以内で出力してください。
-    """
+         return "モードエラー: 不明なモードです"
+
+    # --- 3. 生成 ---
     try:
         if "OPENAI_API_KEY" in st.secrets:
             client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -187,9 +263,9 @@ def get_ai_agent_advice(df):
             )
             return response.choices[0].message.content
         else:
-            return "OpenAI APIキーが設定されていません。"
+            return "APIキー設定なし"
     except Exception as e:
-        return f"AIエージェント接続エラー: {e}"
+        return f"エラー: {e}"
 
 def get_worksheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -259,6 +335,8 @@ def init_session_state():
         st.session_state['selected_exercise'] = None
     if 'selected_body_part' not in st.session_state:
         st.session_state['selected_body_part'] = 'All'
+    if 'exercises' not in st.session_state:
+        st.session_state['exercises'] = load_exercises()
     if 'username' not in st.session_state:
         st.session_state['username'] = None
     if 'is_logged_in' not in st.session_state:
@@ -285,7 +363,7 @@ def render_login():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<div class="login-title" style="text-align: center;">LIFT OS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-title" style="text-align: center;">PLUS ULTRA</div>', unsafe_allow_html=True)
     
     with st.form("login_form"):
         st.markdown("### ユーザーログイン")
@@ -376,35 +454,78 @@ def render_dashboard(df):
     # タイトル & ユーザー情報
     c1, c2 = st.columns([3, 1])
     with c1:
-        st.markdown(f'<div class="custom-title">LIFT OS</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="custom-title">PLUS ULTRA</div>', unsafe_allow_html=True)
     with c2:
         st.write(f"User: **{st.session_state['username']}**")
         if st.button("Logout", key="logout_btn", use_container_width=True):
             logout()
-
-    # 1. AIエージェントエリア (修正: 枠線コンテナにして謎の四角を消去)
-    with st.container(border=True):
-        col_ai_icon, col_ai_text = st.columns([1, 6])
-        with col_ai_icon:
-            st.image("https://api.dicebear.com/7.x/bottts/svg?seed=WorkoutAI", width=60)
-        with col_ai_text:
-            st.markdown('<div class="ai-title">AI Coach Agent</div>', unsafe_allow_html=True)
-            if not df.empty:
-                if 'ai_advice' not in st.session_state:
-                     st.session_state['ai_advice'] = "今日も頑張りましょう！トレーニングを開始してください。"
-                
-                st.markdown(f'<div class="ai-message">{st.session_state["ai_advice"]}</div>', unsafe_allow_html=True)
-                if st.button("今日のアドバイスを更新", key="refresh_ai"):
-                    with st.spinner("思考中..."):
-                        advice = get_ai_agent_advice(df)
-                        st.session_state['ai_advice'] = advice
+    # ★追加: サイドバーでAIモード設定
+    with st.sidebar:
+        st.markdown("### ⚙️ 設定")
+        ai_mode = st.radio(
+            "AIコーチングモード",
+            ["✨ 励ましエンジェル", "🔥 鬼軍曹", "🤖 システムOS", "🤐 OFF"],
+            index=0
+        )
+        st.divider()
+        
+        # --- 種目管理 ---
+        with st.expander("🛠 種目管理"):
+            st.caption("新しい種目の追加")
+            new_ex_name = st.text_input("種目名", key="new_ex_name")
+            new_ex_part = st.selectbox("部位", list(st.session_state['exercises'].keys()), key="new_ex_part")
+            if st.button("追加", key="add_ex_btn"):
+                if new_ex_name and new_ex_part:
+                    if new_ex_name not in st.session_state['exercises'][new_ex_part]:
+                        st.session_state['exercises'][new_ex_part].append(new_ex_name)
+                        save_exercises(st.session_state['exercises'])
+                        st.success(f"{new_ex_name} を追加しました")
                         st.rerun()
-            else:
-                st.markdown('<div class="ai-message">データがありません。初回のトレーニングを記録しましょう！</div>', unsafe_allow_html=True)
+                    else:
+                        st.warning("その種目は既に存在します")
+            
+            st.divider()
+            st.caption("種目の削除")
+            del_part = st.selectbox("部位選択", list(st.session_state['exercises'].keys()), key="del_part_select")
+            del_ex = st.selectbox("削除する種目", st.session_state['exercises'][del_part], key="del_ex_select")
+            if st.button("削除", key="del_ex_btn"):
+                if del_ex in st.session_state['exercises'][del_part]:
+                    st.session_state['exercises'][del_part].remove(del_ex)
+                    save_exercises(st.session_state['exercises'])
+                    st.success(f"{del_ex} を削除しました")
+                    st.rerun()
+
+    # 1. AIエージェントエリア (OFFなら表示しない)
+    if ai_mode != "🤐 OFF":
+        with st.container(border=True):
+            col_ai_icon, col_ai_text = st.columns([1, 6])
+            with col_ai_icon:
+                st.image("https://api.dicebear.com/7.x/bottts/svg?seed=WorkoutAI", width=60)
+            with col_ai_text:
+                st.markdown('<div class="ai-title">AI Coach Agent</div>', unsafe_allow_html=True)
+                if not df.empty:
+                    # モードが変わったらアドバイスも再生成したいので、キーにモードを含める
+                    advice_key = f'ai_advice_{ai_mode}'
+                    
+                    if advice_key not in st.session_state:
+                         # 初回ロード時はとりあえずデフォルトメッセージ（API節約）
+                         st.session_state[advice_key] = "今日も限界を超えていきましょう。" if ai_mode == "🔥 鬼軍曹" else "今日も頑張りましょう！"
+                    
+                    st.markdown(f'<div class="ai-message">{st.session_state[advice_key]}</div>', unsafe_allow_html=True)
+                    
+                    if st.button("アドバイスを更新", key="refresh_ai"):
+                        with st.spinner("思考中..."):
+                            # ★変更: モードを渡す
+                            advice = get_ai_agent_advice(df, ai_mode)
+                            st.session_state[advice_key] = advice
+                            st.rerun()
+                else:
+                    st.markdown('<div class="ai-message">データがありません。</div>', unsafe_allow_html=True)
 
     # 2. ナビゲーション & フィルタ
     st.write("##### 部位フィルター")
-    parts = ["All"] + list(EXERCISES.keys())
+    exercises_dict = st.session_state['exercises']
+    parts = ["All"] + list(exercises_dict.keys())
     cols = st.columns(len(parts))
     for i, part in enumerate(parts):
         if cols[i].button(part, key=f"filter_{part}", use_container_width=True, type="primary" if st.session_state['selected_body_part'] == part else "secondary"):
@@ -416,10 +537,10 @@ def render_dashboard(df):
     target_part = st.session_state['selected_body_part']
     if target_part == "All":
         target_exercises = []
-        for p in EXERCISES:
-            target_exercises.extend(EXERCISES[p])
+        for p in exercises_dict:
+            target_exercises.extend(exercises_dict[p])
     else:
-        target_exercises = EXERCISES[target_part]
+        target_exercises = exercises_dict[target_part]
 
     for exercise in target_exercises:
         last_rec_text = "記録なし"
@@ -443,7 +564,7 @@ def render_detail_view(df, exercise_name):
     # ヘッダー
     c1, c2 = st.columns([1, 5])
     with c1:
-        if st.button("< Back"):
+        if st.button("戻る"):
             navigate_to('dashboard')
     with c2:
         st.markdown(f'<div class="custom-title" style="font-size: 2rem;">{exercise_name}</div>', unsafe_allow_html=True)
